@@ -1,0 +1,774 @@
+{% extends "base.html" %}
+
+{% block title %}Grade Submission - {{ submission.assignment_title }}{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1 class="title">📝 Grade Submission</h1>
+    <div class="submission-header-info">
+        <h2>{{ submission.assignment_title }}</h2>
+        <div class="meta-row">
+            <span><strong>Engineer:</strong> {{ submission.engineer_id }}</span>
+            <span><strong>Topic:</strong> {{ submission.assignment_topic|title }}</span>
+            <span><strong>Submitted:</strong> {{ submission.submitted_date }}</span>
+            <span><strong>Max Points:</strong> {{ submission.assignment_points }}</span>
+        </div>
+    </div>
+</div>
+
+<!-- Grading Controls -->
+<div class="grading-controls">
+    <button class="btn btn-success" onclick="autoGradeAll()">🤖 Auto-Grade All Questions</button>
+    <button class="btn btn-secondary" onclick="resetScores()">🔄 Reset All Scores</button>
+    <button class="btn" onclick="saveAsDraft()">💾 Save as Draft</button>
+    <span class="total-score-display">Total: <span id="totalScore">0</span>/{{ submission.assignment_points }}</span>
+</div>
+
+<!-- Grading Form -->
+<form id="gradingForm" method="POST" action="/submit_grade">
+    <input type="hidden" name="submission_id" value="{{ submission.id }}">
+    <input type="hidden" name="total_score" id="totalScoreInput" value="0">
+
+    <!-- Individual Question Grading -->
+    <div class="questions-section">
+        {% for question in submission.assignment_questions %}
+        <div class="question-grading-card" data-question="{{ loop.index0 }}">
+            <div class="question-header">
+                <div class="question-title">
+                    <h3>Question {{ loop.index }}</h3>
+                    <div class="question-score-input">
+                        <input type="number" 
+                               name="question_score_{{ loop.index0 }}" 
+                               id="score_{{ loop.index0 }}"
+                               min="0" 
+                               max="{{ (submission.assignment_points / 15)|round|int }}"
+                               value="0"
+                               onchange="updateTotalScore()"
+                               class="score-input">
+                        <span class="max-score">/ {{ (submission.assignment_points / 15)|round|int }}</span>
+                    </div>
+                    <button type="button" class="btn btn-small" onclick="autoGradeQuestion({{ loop.index0 }})">
+                        🤖 Auto-Grade
+                    </button>
+                </div>
+            </div>
+
+            <div class="question-content">
+                <div class="question-text">
+                    <h4>📋 Question:</h4>
+                    <p>{{ question }}</p>
+                </div>
+
+                <div class="student-answer">
+                    <h4>✍️ Student Answer:</h4>
+                    <div class="answer-display">
+                        {% if submission.answers[loop.index0] %}
+                            {{ submission.answers[loop.index0] }}
+                        {% else %}
+                            <em style="color: #6c757d;">No answer provided</em>
+                        {% endif %}
+                    </div>
+                    <div class="answer-stats">
+                        {% if submission.answers[loop.index0] %}
+                        <span>Words: {{ submission.answers[loop.index0].split()|length }}</span>
+                        <span>Characters: {{ submission.answers[loop.index0]|length }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- Auto-Analysis Display -->
+                {% if auto_analysis[loop.index0] %}
+                <div class="auto-analysis">
+                    <h4>🤖 AI Analysis:</h4>
+                    <div class="analysis-metrics">
+                        <span class="metric">
+                            <strong>Technical Score:</strong> {{ auto_analysis[loop.index0].technical_score }}/10
+                        </span>
+                        <span class="metric">
+                            <strong>Overall Score:</strong> {{ auto_analysis[loop.index0].overall_score|round|int }}%
+                        </span>
+                        <span class="metric">
+                            <strong>Examples:</strong> {{ '✅' if auto_analysis[loop.index0].has_examples else '❌' }}
+                        </span>
+                        <span class="metric">
+                            <strong>Analysis:</strong> {{ '✅' if auto_analysis[loop.index0].has_analysis else '❌' }}
+                        </span>
+                    </div>
+                    <div class="ai-feedback">
+                        <strong>AI Feedback:</strong> {{ auto_analysis[loop.index0].feedback }}
+                    </div>
+                    <button type="button" class="btn btn-small" onclick="applySuggestedScore({{ loop.index0 }}, {{ auto_analysis[loop.index0].overall_score }})">
+                        Use Suggested Score ({{ ((auto_analysis[loop.index0].overall_score / 100) * (submission.assignment_points / 15))|round|int }})
+                    </button>
+                </div>
+                {% endif %}
+
+                <!-- Grading Rubric -->
+                {% if template %}
+                <div class="grading-rubric">
+                    <h4>📊 Grading Criteria:</h4>
+                    <div class="criteria-grid">
+                        {% for criterion in template.criteria %}
+                        <div class="criterion">
+                            <input type="checkbox" id="criterion_{{ loop.outer_loop.index0 }}_{{ loop.index0 }}">
+                            <label for="criterion_{{ loop.outer_loop.index0 }}_{{ loop.index0 }}">{{ criterion }}</label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Individual Feedback -->
+                <div class="question-feedback">
+                    <h4>💬 Feedback for this question:</h4>
+                    <textarea name="question_feedback_{{ loop.index0 }}" 
+                              id="feedback_{{ loop.index0 }}"
+                              placeholder="Provide specific feedback for this answer..."
+                              rows="3"></textarea>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- Overall Feedback Section -->
+    <div class="overall-feedback-section">
+        <h3>📝 Overall Feedback</h3>
+        <textarea name="overall_feedback" 
+                  id="overallFeedback"
+                  placeholder="Provide overall feedback on the submission quality, strengths, areas for improvement..."
+                  rows="6"></textarea>
+        
+        <div class="feedback-templates">
+            <h4>📋 Quick Feedback Templates:</h4>
+            <button type="button" class="btn btn-small" onclick="addTemplate('excellent')">Excellent Work</button>
+            <button type="button" class="btn btn-small" onclick="addTemplate('good')">Good Understanding</button>
+            <button type="button" class="btn btn-small" onclick="addTemplate('needs_improvement')">Needs Improvement</button>
+            <button type="button" class="btn btn-small" onclick="addTemplate('incomplete')">Incomplete Answers</button>
+        </div>
+    </div>
+
+    <!-- Submit Grading -->
+    <div class="grading-submission">
+        <div class="final-score-summary">
+            <h3>📊 Final Score: <span id="finalScore">0</span>/{{ submission.assignment_points }}</h3>
+            <div class="grade-percentage">
+                Grade: <span id="gradePercentage">0</span>% 
+                (<span id="letterGrade">F</span>)
+            </div>
+        </div>
+        
+        <div class="submission-buttons">
+            <a href="/grading" class="btn">← Back to Grading Dashboard</a>
+            <button type="submit" class="btn btn-success" onclick="return confirmSubmission()">
+                ✅ Submit Grade
+            </button>
+        </div>
+    </div>
+</form>
+
+<style>
+.submission-header-info {
+    background: #f8f9fa;
+    padding: 20px;
+    border-radius: 8px;
+    margin: 20px 0;
+}
+
+.submission-header-info h2 {
+    margin: 0 0 15px 0;
+    color: #2c3e50;
+}
+
+.meta-row {
+    display: flex;
+    gap: 30px;
+    flex-wrap: wrap;
+    color: #6c757d;
+}
+
+.grading-controls {
+    display: flex;
+    gap: 15px;
+    align-items: center;
+    padding: 20px;
+    background: #e9ecef;
+    border-radius: 8px;
+    margin: 20px 0;
+    flex-wrap: wrap;
+}
+
+.total-score-display {
+    margin-left: auto;
+    font-size: 1.2em;
+    font-weight: bold;
+    color: #2c3e50;
+    background: white;
+    padding: 10px 15px;
+    border-radius: 5px;
+}
+
+.questions-section {
+    margin: 20px 0;
+}
+
+.question-grading-card {
+    background: white;
+    border: 1px solid #dee2e6;
+    border-radius: 10px;
+    margin-bottom: 30px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+.question-header {
+    background: #f8f9fa;
+    padding: 20px;
+    border-bottom: 1px solid #dee2e6;
+    border-radius: 10px 10px 0 0;
+}
+
+.question-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 20px;
+}
+
+.question-title h3 {
+    margin: 0;
+    color: #2c3e50;
+}
+
+.question-score-input {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.score-input {
+    width: 80px;
+    padding: 8px;
+    border: 2px solid #3498db;
+    border-radius: 5px;
+    font-size: 16px;
+    font-weight: bold;
+    text-align: center;
+}
+
+.score-input:focus {
+    outline: none;
+    border-color: #2980b9;
+    box-shadow: 0 0 5px rgba(52, 152, 219, 0.3);
+}
+
+.max-score {
+    font-weight: bold;
+    color: #6c757d;
+}
+
+.question-content {
+    padding: 20px;
+}
+
+.question-text, .student-answer, .auto-analysis, .grading-rubric, .question-feedback {
+    margin-bottom: 25px;
+}
+
+.question-text h4, .student-answer h4, .auto-analysis h4, .grading-rubric h4, .question-feedback h4 {
+    margin: 0 0 10px 0;
+    color: #2c3e50;
+    font-size: 16px;
+}
+
+.question-text p {
+    background: #e3f2fd;
+    padding: 15px;
+    border-radius: 5px;
+    border-left: 4px solid #2196f3;
+    margin: 0;
+}
+
+.answer-display {
+    background: #f8f9fa;
+    padding: 20px;
+    border-radius: 5px;
+    border: 1px solid #dee2e6;
+    line-height: 1.6;
+    white-space: pre-wrap;
+}
+
+.answer-stats {
+    margin-top: 10px;
+    display: flex;
+    gap: 20px;
+    font-size: 12px;
+    color: #6c757d;
+}
+
+.auto-analysis {
+    background: #f0f8ff;
+    padding: 15px;
+    border-radius: 5px;
+    border-left: 4px solid #007bff;
+}
+
+.analysis-metrics {
+    display: flex;
+    gap: 20px;
+    margin: 10px 0;
+    flex-wrap: wrap;
+}
+
+.metric {
+    background: white;
+    padding: 5px 10px;
+    border-radius: 3px;
+    font-size: 12px;
+    border: 1px solid #dee2e6;
+}
+
+.ai-feedback {
+    background: white;
+    padding: 10px;
+    border-radius: 3px;
+    margin: 10px 0;
+    font-style: italic;
+}
+
+.criteria-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.criterion {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    background: #f8f9fa;
+    border-radius: 3px;
+}
+
+.criterion input[type="checkbox"] {
+    transform: scale(1.2);
+}
+
+.question-feedback textarea {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #dee2e6;
+    border-radius: 5px;
+    font-family: inherit;
+    resize: vertical;
+}
+
+.overall-feedback-section {
+    background: #f8f9fa;
+    padding: 25px;
+    border-radius: 10px;
+    margin: 30px 0;
+}
+
+.overall-feedback-section h3 {
+    margin: 0 0 15px 0;
+    color: #2c3e50;
+}
+
+.overall-feedback-section textarea {
+    width: 100%;
+    padding: 15px;
+    border: 1px solid #dee2e6;
+    border-radius: 5px;
+    font-family: inherit;
+    margin-bottom: 15px;
+}
+
+.feedback-templates {
+    margin-top: 15px;
+}
+
+.feedback-templates h4 {
+    margin: 0 0 10px 0;
+    color: #2c3e50;
+    font-size: 14px;
+}
+
+.grading-submission {
+    background: #e8f5e8;
+    padding: 25px;
+    border-radius: 10px;
+    border: 2px solid #28a745;
+}
+
+.final-score-summary {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.final-score-summary h3 {
+    margin: 0 0 10px 0;
+    color: #2c3e50;
+    font-size: 24px;
+}
+
+.grade-percentage {
+    font-size: 18px;
+    color: #6c757d;
+}
+
+.submission-buttons {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+@media (max-width: 768px) {
+    .question-title {
+        flex-direction: column;
+        gap: 15px;
+        align-items: stretch;
+    }
+    
+    .meta-row {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .grading-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .total-score-display {
+        margin: 0;
+        text-align: center;
+    }
+    
+    .analysis-metrics {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .submission-buttons {
+        flex-direction: column;
+        gap: 15px;
+    }
+}
+</style>
+
+<script>
+// Feedback templates
+const feedbackTemplates = {
+    excellent: "Excellent work! Your answers demonstrate deep understanding of the concepts with practical examples and industry best practices. Your analysis is thorough and well-structured. Keep up the outstanding work!",
+    
+    good: "Good understanding of the concepts with solid explanations. Your answers show practical knowledge and reasonable analysis. Consider adding more specific examples and detailed trade-off analysis for even stronger responses.",
+    
+    needs_improvement: "Your answers show basic understanding but need more depth and technical detail. Focus on providing specific examples, detailed analysis, and practical considerations. Review the course materials and industry best practices for stronger responses.",
+    
+    incomplete: "Several answers are incomplete or lack sufficient detail. Please ensure you address all parts of each question with comprehensive explanations. Aim for at least 200 words per answer with technical depth and practical examples."
+};
+
+function updateTotalScore() {
+    let total = 0;
+    const scoreInputs = document.querySelectorAll('.score-input');
+    
+    scoreInputs.forEach(input => {
+        total += parseInt(input.value) || 0;
+    });
+    
+    document.getElementById('totalScore').textContent = total;
+    document.getElementById('totalScoreInput').value = total;
+    document.getElementById('finalScore').textContent = total;
+    
+    // Calculate percentage and letter grade
+    const maxPoints = {{ submission.assignment_points }};
+    const percentage = Math.round((total / maxPoints) * 100);
+    document.getElementById('gradePercentage').textContent = percentage;
+    
+    let letterGrade = 'F';
+    if (percentage >= 90) letterGrade = 'A';
+    else if (percentage >= 80) letterGrade = 'B';
+    else if (percentage >= 70) letterGrade = 'C';
+    else if (percentage >= 60) letterGrade = 'D';
+    
+    document.getElementById('letterGrade').textContent = letterGrade;
+    
+    // Color code the grade
+    const gradeElement = document.getElementById('letterGrade');
+    gradeElement.className = '';
+    if (percentage >= 80) gradeElement.style.color = '#28a745';
+    else if (percentage >= 70) gradeElement.style.color = '#ffc107';
+    else if (percentage >= 60) gradeElement.style.color = '#fd7e14';
+    else gradeElement.style.color = '#dc3545';
+}
+
+async function autoGradeQuestion(questionIndex) {
+    const button = event.target;
+    const originalText = button.textContent;
+    
+    button.textContent = '⏳ Analyzing...';
+    button.disabled = true;
+    
+    // Get the answer text
+    const answerText = {{ submission.answers|tojsonhtml }};
+    const answer = answerText[questionIndex];
+    const topic = '{{ submission.assignment_topic }}';
+    
+    // Simulate AI analysis (you could make an API call here)
+    setTimeout(() => {
+        const analysis = analyzeAnswer(answer, topic);
+        const maxPointsPerQuestion = Math.round({{ submission.assignment_points }} / 15);
+        const suggestedScore = Math.round((analysis.score / 100) * maxPointsPerQuestion);
+        
+        // Update score input
+        document.getElementById(`score_${questionIndex}`).value = suggestedScore;
+        
+        // Update feedback
+        const feedbackTextarea = document.getElementById(`feedback_${questionIndex}`);
+        feedbackTextarea.value = analysis.feedback;
+        
+        // Update total score
+        updateTotalScore();
+        
+        button.textContent = `✅ ${suggestedScore}/${maxPointsPerQuestion}`;
+        button.style.background = '#28a745';
+        
+        setTimeout(() => {
+            button.textContent = originalText;
+            button.style.background = '';
+            button.disabled = false;
+        }, 3000);
+    }, 1500);
+}
+
+function analyzeAnswer(answer, topic) {
+    if (!answer || answer.trim() === '') {
+        return {
+            score: 0,
+            feedback: "No answer provided."
+        };
+    }
+    
+    const wordCount = answer.split(' ').length;
+    const hasExamples = /example|for instance|such as|consider/.test(answer.toLowerCase());
+    const hasAnalysis = /analysis|compare|trade-off|advantage|disadvantage/.test(answer.toLowerCase());
+    const hasTechnicalTerms = /design|implementation|optimization|performance/.test(answer.toLowerCase());
+    
+    let score = 0;
+    let feedback = [];
+    
+    // Word count scoring (0-30 points)
+    if (wordCount >= 200) {
+        score += 30;
+        feedback.push("Good length and detail");
+    } else if (wordCount >= 100) {
+        score += 20;
+        feedback.push("Adequate length but could be more detailed");
+    } else {
+        score += 10;
+        feedback.push("Answer is too brief - aim for 200+ words");
+    }
+    
+    // Content quality (0-40 points)
+    if (hasTechnicalTerms) {
+        score += 15;
+        feedback.push("Good use of technical terminology");
+    } else {
+        feedback.push("Include more technical concepts and terminology");
+    }
+    
+    if (hasExamples) {
+        score += 15;
+        feedback.push("Good use of examples");
+    } else {
+        feedback.push("Add specific examples to strengthen your answer");
+    }
+    
+    if (hasAnalysis) {
+        score += 10;
+        feedback.push("Shows analytical thinking");
+    } else {
+        feedback.push("Include more analysis and trade-off considerations");
+    }
+    
+    // Structure and clarity (0-30 points)
+    const sentences = answer.split('.').length;
+    if (sentences > 5) {
+        score += 20;
+        feedback.push("Well-structured response");
+    } else {
+        score += 10;
+        feedback.push("Improve structure with more detailed explanations");
+    }
+    
+    return {
+        score: Math.min(100, score),
+        feedback: feedback.join('; ')
+    };
+}
+
+async function autoGradeAll() {
+    const confirmAuto = confirm('Auto-grade all questions? This will overwrite any existing scores.');
+    if (!confirmAuto) return;
+    
+    const questionCount = {{ submission.answers|length }};
+    
+    for (let i = 0; i < questionCount; i++) {
+        const button = document.querySelector(`button[onclick="autoGradeQuestion(${i})"]`);
+        if (button) {
+            button.click();
+            // Wait a bit between questions
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+    }
+    
+    showNotification('Auto-grading completed for all questions!', 'success');
+}
+
+function resetScores() {
+    const confirmReset = confirm('Reset all scores to 0?');
+    if (!confirmReset) return;
+    
+    document.querySelectorAll('.score-input').forEach(input => {
+        input.value = 0;
+    });
+    
+    document.querySelectorAll('textarea[name^="question_feedback_"]').forEach(textarea => {
+        textarea.value = '';
+    });
+    
+    updateTotalScore();
+    showNotification('All scores reset', 'info');
+}
+
+function applySuggestedScore(questionIndex, overallScore) {
+    const maxPointsPerQuestion = Math.round({{ submission.assignment_points }} / 15);
+    const suggestedScore = Math.round((overallScore / 100) * maxPointsPerQuestion);
+    
+    document.getElementById(`score_${questionIndex}`).value = suggestedScore;
+    updateTotalScore();
+    
+    showNotification(`Applied suggested score: ${suggestedScore}/${maxPointsPerQuestion}`, 'success');
+}
+
+function addTemplate(templateType) {
+    const overallFeedback = document.getElementById('overallFeedback');
+    const template = feedbackTemplates[templateType];
+    
+    if (overallFeedback.value.trim() === '') {
+        overallFeedback.value = template;
+    } else {
+        overallFeedback.value += '\n\n' + template;
+    }
+    
+    showNotification('Feedback template added', 'success');
+}
+
+function saveAsDraft() {
+    // Save current state to localStorage
+    const formData = new FormData(document.getElementById('gradingForm'));
+    const draftData = {};
+    
+    for (let [key, value] of formData.entries()) {
+        draftData[key] = value;
+    }
+    
+    localStorage.setItem(`grading_draft_${draftData.submission_id}`, JSON.stringify(draftData));
+    
+    showNotification('Draft saved!', 'success');
+}
+
+function loadDraft() {
+    const submissionId = '{{ submission.id }}';
+    const draftData = localStorage.getItem(`grading_draft_${submissionId}`);
+    
+    if (draftData) {
+        const data = JSON.parse(draftData);
+        
+        Object.keys(data).forEach(key => {
+            const element = document.querySelector(`[name="${key}"]`);
+            if (element) {
+                element.value = data[key];
+            }
+        });
+        
+        updateTotalScore();
+        showNotification('Draft loaded', 'info');
+    }
+}
+
+function confirmSubmission() {
+    const totalScore = document.getElementById('totalScore').textContent;
+    const maxPoints = {{ submission.assignment_points }};
+    const percentage = Math.round((totalScore / maxPoints) * 100);
+    
+    return confirm(`Submit grade of ${totalScore}/${maxPoints} (${percentage}%)?\n\nThis action cannot be undone.`);
+}
+
+function showNotification(message, type = 'info') {
+    const notification = document.createElement('div');
+    notification.className = `notification notification-${type}`;
+    notification.textContent = message;
+    
+    notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        padding: 15px 20px;
+        border-radius: 5px;
+        color: white;
+        font-weight: bold;
+        z-index: 2000;
+        transform: translateX(100%);
+        transition: transform 0.3s ease;
+    `;
+    
+    const colors = {
+        success: '#28a745',
+        error: '#dc3545',
+        info: '#17a2b8',
+        warning: '#ffc107'
+    };
+    notification.style.backgroundColor = colors[type] || colors.info;
+    
+    document.body.appendChild(notification);
+    
+    setTimeout(() => {
+        notification.style.transform = 'translateX(0)';
+    }, 100);
+    
+    setTimeout(() => {
+        notification.style.transform = 'translateX(100%)';
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.parentNode.removeChild(notification);
+            }
+        }, 300);
+    }, 3000);
+}
+
+// Auto-save draft every 30 seconds
+setInterval(saveAsDraft, 30000);
+
+// Load draft on page load
+document.addEventListener('DOMContentLoaded', () => {
+    loadDraft();
+    updateTotalScore();
+});
+
+// Warn before leaving page with unsaved changes
+window.addEventListener('beforeunload', function(e) {
+    const hasChanges = document.querySelectorAll('.score-input').some(input => 
+        parseInt(input.value) > 0
+    );
+    
+    if (hasChanges) {
+        e.preventDefault();
+        e.returnValue = 'You have unsaved grading changes. Are you sure you want to leave?';
+        return e.returnValue;
+    }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}{{ assignment.title }} - Physical Design Assignment{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1 class="title">{{ assignment.title }}</h1>
+    <p><strong>Assignment ID:</strong> {{ assignment.id }}</p>
+    <p><strong>Engineer:</strong> {{ assignment.engineer_id }}</p>
+</div>
+
+<div class="meta-info">
+    <div class="meta-item">
+        <div class="meta-label">Topic</div>
+        <div class="meta-value">{{ assignment.topic|title }}</div>
+    </div>
+    <div class="meta-item">
+        <div class="meta-label">Difficulty</div>
+        <div class="meta-value">
+            <span class="difficulty">{{ difficulty_stars }} ({{ assignment.difficulty }}/5)</span>
+        </div>
+    </div>
+    <div class="meta-item">
+        <div class="meta-label">Points</div>
+        <div class="meta-value">
+            <span class="points">{{ assignment.points }} pts</span>
+        </div>
+    </div>
+    <div class="meta-item">
+        <div class="meta-label">Due Date</div>
+        <div class="meta-value">
+            <span class="due-date">{{ assignment.due_date }}</span>
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <h3>📋 Assignment Questions</h3>
+    {% for question in assignment.questions %}
+    <div class="question">
+        <div class="question-number">Question {{ loop.index }}:</div>
+        <p>{{ question }}</p>
+    </div>
+    {% endfor %}
+</div>
+
+<div class="section">
+    <h3>📦 Deliverables</h3>
+    {% for deliverable in assignment.deliverables %}
+    <div class="deliverable">
+        • {{ deliverable }}
+    </div>
+    {% endfor %}
+</div>
+
+<div class="submission-info">
+    <h3>📤 Submission Instructions</h3>
+    <p><strong>Deadline:</strong> {{ assignment.due_date }} by 11:59 PM</p>
+    <p><strong>Submission Format:</strong> Submit all files in a single folder named <code>{{ assignment.id }}_{{ assignment.engineer_id }}</code></p>
+    <p><strong>File Naming:</strong> Use clear, descriptive filenames for all documents and diagrams.</p>
+</div>
+
+<div class="section">
+    <a href="/" class="btn">← Back to Dashboard</a>
+    <button class="btn btn-success" onclick="markCompleted()">Mark as Completed</button>
+</div>
+
+<div class="footer">
+    <p><strong>Physical Design Internship Program</strong></p>
+    <p>Generated on: {{ assignment.created_date }}</p>
+    <p>Need help? Contact your supervisor or check the knowledge base.</p>
+</div>
+
+<script>
+function markCompleted() {
+    alert('Assignment marked as completed! (Feature can be enhanced with submission tracking)');
+}
+</script>
+{% endblock %}
