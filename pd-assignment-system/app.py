@@ -1,990 +1,1027 @@
-import os
-import json
+# app/blueprints/auth/__init__.py
+from flask import Blueprint
+
+auth_bp = Blueprint('auth', __name__)
+
+from app.blueprints.auth import routes
+
+# app/blueprints/auth/routes.py - Authentication Routes
+from flask import render_template, request, redirect, url_for, flash, jsonify
+from flask_login import login_user, logout_user, login_required, current_user
+from app.blueprints.auth import auth_bp
+from app.models.user import User
+from app import db
+import datetime
+
+@auth_bp.route('/login', methods=['GET', 'POST'])
+def login():
+    """User login"""
+    if current_user.is_authenticated:
+        # Redirect based on role
+        if current_user.is_admin():
+            return redirect(url_for('admin.dashboard'))
+        else:
+            return redirect(url_for('engineer.dashboard'))
+    
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        if not username or not password:
+            flash('Please provide both username and password.', 'error')
+            return render_template('auth/login.html')
+        
+        # Find user
+        user = User.query.filter_by(username=username).first()
+        
+        if user and user.check_password(password) and user.is_active:
+            # Update last login
+            user.last_login = datetime.datetime.utcnow()
+            db.session.commit()
+            
+            # Login user
+            login_user(user, remember=True)
+            
+            # Redirect based on role
+            if user.is_admin():
+                flash(f'Welcome back, Admin {user.username}!', 'success')
+                return redirect(url_for('admin.dashboard'))
+            else:
+                flash(f'Welcome back, {user.username}!', 'success')
+                return redirect(url_for('engineer.dashboard'))
+        else:
+            flash('Invalid username or password.', 'error')
+    
+    return render_template('auth/login.html')
+
+@auth_bp.route('/logout')
+@login_required
+def logout():
+    """User logout"""
+    username = current_user.username
+    logout_user()
+    flash(f'Goodbye, {username}! You have been logged out successfully.', 'info')
+    return redirect(url_for('auth.login'))
+
+@auth_bp.route('/register', methods=['GET', 'POST'])
+def register():
+    """Engineer registration (Admin can also register engineers)"""
+    # Only allow registration if current user is admin or no users exist
+    if User.query.count() > 0 and (not current_user.is_authenticated or not current_user.is_admin()):
+        flash('Registration is restricted. Please contact an administrator.', 'error')
+        return redirect(url_for('auth.login'))
+    
+    if request.method == 'POST':
+        data = request.form
+        
+        # Validate input
+        username = data.get('username', '').strip()
+        email = data.get('email', '').strip()
+        password = data.get('password', '')
+        confirm_password = data.get('confirm_password', '')
+        engineer_id = data.get('engineer_id', '').strip()
+        department = data.get('department', '').strip()
+        role = data.get('role', 'engineer')
+        
+        errors = []
+        
+        if not username or len(username) < 3:
+            errors.append('Username must be at least 3 characters long.')
+        
+        if User.query.filter_by(username=username).first():
+            errors.append('Username already exists.')
+        
+        if not email or '@' not in email:
+            errors.append('Valid email address is required.')
+        
+        if User.query.filter_by(email=email).first():
+            errors.append('Email address already registered.')
+        
+        if not password or len(password) < 6:
+            errors.append('Password must be at least 6 characters long.')
+        
+        if password != confirm_password:
+            errors.append('Passwords do not match.')
+        
+        if role == 'engineer':
+            if not engineer_id:
+                errors.append('Engineer ID is required.')
+            elif User.query.filter_by(engineer_id=engineer_id).first():
+                errors.append('Engineer ID already exists.')
+        
+        if errors:
+            for error in errors:
+                flash(error, 'error')
+            return render_template('auth/register.html')
+        
+        try:
+            # Create user
+            user = User(
+                username=username,
+                email=email,
+                role=role,
+                engineer_id=engineer_id if role == 'engineer' else None,
+                department=department if role == 'engineer' else None
+            )
+            user.set_password(password)
+            
+            db.session.add(user)
+            db.session.commit()
+            
+            flash(f'Registration successful! Welcome, {username}.', 'success')
+            
+            # Auto-login the new user if they're the first user (admin)
+            if User.query.count() == 1:
+                login_user(user)
+                return redirect(url_for('admin.dashboard'))
+            
+            return redirect(url_for('auth.login'))
+            
+        except Exception as e:
+            db.session.rollback()
+            flash('Registration failed. Please try again.', 'error')
+    
+    return render_template('auth/register.html')
+
+# app/blueprints/admin/__init__.py
+from flask import Blueprint
+
+admin_bp = Blueprint('admin', __name__)
+
+from app.blueprints.admin import dashboard, submissions, assignments, users
+
+# app/blueprints/admin/dashboard.py - Admin Dashboard
+from flask import render_template, jsonify
+from flask_login import login_required, current_user
+from app.blueprints.admin import admin_bp
+from app.models.user import User, UserRole
+from app.models.assignment import Assignment, Submission
+from app.auth.decorators import admin_required
+from app import db
+from datetime import datetime, timedelta
+
+@admin_bp.route('/dashboard')
+@login_required
+@admin_required
+def dashboard():
+    """Admin dashboard with system overview"""
+    
+    # Calculate statistics
+    total_engineers = User.query.filter_by(role=UserRole.ENGINEER, is_active=True).count()
+    total_submissions = Submission.query.count()
+    pending_grading = Submission.query.filter(
+        Submission.admin_grade.is_(None)
+    ).count()
+    graded_submissions = Submission.query.filter(
+        Submission.admin_grade.isnot(None),
+        Submission.is_grade_released == True
+    ).count()
+    
+    # Recent activity (last 7 days)
+    recent_activities = []
+    
+    # Recent submissions
+    recent_submissions = Submission.query.filter(
+        Submission.submitted_date >= datetime.utcnow() - timedelta(days=7)
+    ).order_by(Submission.submitted_date.desc()).limit(5).all()
+    
+    for submission in recent_submissions:
+        recent_activities.append({
+            'title': 'New Submission',
+            'description': f'{submission.engineer.username} submitted {submission.assignment.title}',
+            'timestamp': submission.submitted_date.strftime('%Y-%m-%d %H:%M')
+        })
+    
+    # Recent registrations
+    recent_users = User.query.filter(
+        User.created_date >= datetime.utcnow() - timedelta(days=7),
+        User.role == UserRole.ENGINEER
+    ).order_by(User.created_date.desc()).limit(3).all()
+    
+    for user in recent_users:
+        recent_activities.append({
+            'title': 'New Engineer Registration',
+            'description': f'{user.username} ({user.engineer_id}) joined the system',
+            'timestamp': user.created_date.strftime('%Y-%m-%d %H:%M')
+        })
+    
+    # Sort activities by timestamp
+    recent_activities.sort(key=lambda x: x['timestamp'], reverse=True)
+    
+    return render_template('admin/dashboard.html',
+                         total_engineers=total_engineers,
+                         total_submissions=total_submissions,
+                         pending_grading=pending_grading,
+                         graded_submissions=graded_submissions,
+                         recent_activities=recent_activities[:10])
+
+@admin_bp.route('/api/dashboard-stats')
+@login_required
+@admin_required
+def dashboard_stats_api():
+    """API endpoint for live dashboard stats"""
+    stats = {
+        'total_engineers': User.query.filter_by(role=UserRole.ENGINEER, is_active=True).count(),
+        'total_submissions': Submission.query.count(),
+        'pending_grading': Submission.query.filter(Submission.admin_grade.is_(None)).count(),
+        'graded_submissions': Submission.query.filter(
+            Submission.admin_grade.isnot(None),
+            Submission.is_grade_released == True
+        ).count()
+    }
+    
+    return jsonify({'success': True, 'stats': stats})
+
+# app/blueprints/admin/assignments.py - Assignment Management
+from flask import render_template, request, redirect, url_for, flash, jsonify
+from flask_login import login_required, current_user
+from app.blueprints.admin import admin_bp
+from app.models.assignment import Assignment
+from app.models.user import User, UserRole
+from app.services.notification_service import NotificationService
+from app.auth.decorators import admin_required
+from app import db
 import datetime
 import random
-import uuid
-from flask import Flask, jsonify, request, render_template_string
 
-# Initialize Flask app
-app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'railway-secret-key')
-
-# Simple in-memory storage
-assignments_store = {}
-submissions_store = {}
-
-# Assignment topics
+# Topic questions (same as your original TOPICS)
 TOPICS = {
     "floorplanning": [
         "Design a floorplan for a 10mm x 10mm chip with 8 macro blocks. Discuss your placement strategy.",
         "Given a design with 3 power domains, explain how you would approach floorplanning to minimize power grid IR drop.",
-        "Compare different floorplanning approaches for a CPU design. Justify your choice considering area, timing, and power trade-offs.",
-        "How would you handle floorplanning for a design with 2 voltage domains and level shifters?",
-        "Explain the impact of package constraints on your floorplanning decisions for a BGA package.",
-        "Design a hierarchical floorplan for a large design with multiple hierarchy levels.",
-        "How would you optimize floorplan for thermal management in a high-power design?",
-        "Describe your approach to floorplanning for DFT considerations with scan chains.",
-        "How would you handle floorplanning for mixed-signal designs with analog blocks?",
-        "Explain pin assignment strategy for your floorplan considering I/O constraints.",
-        "How would you validate your floorplan meets all timing, power, and area requirements?",
-        "Describe congestion analysis and mitigation strategies in your floorplan.",
-        "How would you handle floorplanning for designs with hard and soft macros?",
-        "Explain your methodology for floorplan optimization iterations and convergence criteria.",
-        "How would you approach floorplanning for low-power designs with power gating?"
+        # ... (include all your original questions)
     ],
     "placement": [
         "Explain the impact of placement on timing for a design running at 1500 MHz. Discuss congestion vs timing trade-offs.",
-        "Design has 80% utilization and 10 routing layers. Analyze placement strategies to minimize routing congestion.",
-        "Compare global placement vs detailed placement algorithms. When would you choose one over the other?",
-        "Given timing violations on setup paths, propose placement-based solutions without changing the netlist.",
-        "How would you handle placement optimization for a design with 4 clock domains and 50 ps skew budget?",
-        "Describe placement strategies for power optimization considering 20% leakage reduction.",
-        "How would you approach placement for designs with 5 timing corners and PVT variations?",
-        "Explain placement techniques for minimizing crosstalk in 7nm technology.",
-        "How would you handle placement of analog blocks in a mixed-signal design with noise constraints?",
-        "Describe your approach to placement optimization for routability in congested designs.",
-        "How would you handle placement for designs with multiple voltage islands and level shifters?",
-        "Explain placement strategies for clock tree synthesis optimization.",
-        "How would you approach placement for DFT structures and scan chain optimization?",
-        "Describe placement techniques for power grid optimization and IR drop minimization.",
-        "How would you validate placement quality and predict routing success?"
+        # ... (include all your original questions)
     ],
     "routing": [
         "Design has 2500 DRC violations after initial routing. Propose a systematic approach to resolve them.",
-        "Explain routing challenges in 7nm technology. How do you handle double patterning constraints?",
-        "Compare different routing algorithms (maze routing, line-search, A*) for a design with high congestion.",
-        "Design requires 12 metal layers for routing. Justify your layer assignment strategy for different net types.",
-        "How would you handle routing for 25 differential pairs with 100 ohm impedance?",
-        "Describe your approach to power grid routing for 2.0 mA/um current density requirements.",
-        "How would you optimize routing for crosstalk reduction in noisy environments?",
-        "Explain routing strategies for clock networks with 30 ps skew targets.",
-        "How would you handle routing in double patterning technology with coloring constraints?",
-        "Describe routing techniques for high-speed signals with 5 GHz switching.",
-        "How would you approach routing for mixed-signal designs with analog isolation requirements?",
-        "Explain routing optimization for manufacturability and yield improvement.",
-        "How would you handle routing congestion resolution without timing degradation?",
-        "Describe routing strategies for power optimization and electromigration prevention.",
-        "How would you validate routing quality and ensure timing closure?"
+        # ... (include all your original questions)
     ]
 }
 
-def analyze_answer(answer):
-    """Simple answer analysis"""
-    words = len(answer.split()) if answer.strip() else 0
+@admin_bp.route('/create-assignment', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def create_assignment():
+    """Admin creates assignments for engineers"""
     
-    if words >= 200:
-        quality = "good"
-        score = 85
-    elif words >= 150:
-        quality = "fair"
-        score = 75
-    elif words >= 50:
-        quality = "poor"
-        score = 60
-    else:
-        quality = "missing"
-        score = 0
+    if request.method == 'POST':
+        engineer_id = request.form.get('engineer_id')
+        topic = request.form.get('topic')
+        custom_title = request.form.get('custom_title', '').strip()
+        due_date = request.form.get('due_date')
+        points = request.form.get('points', 120, type=int)
+        
+        # Validation
+        engineer = User.query.filter_by(id=engineer_id, role=UserRole.ENGINEER).first()
+        if not engineer:
+            flash('Invalid engineer selected.', 'error')
+            return redirect(url_for('admin.create_assignment'))
+        
+        if topic not in TOPICS:
+            flash('Invalid topic selected.', 'error')
+            return redirect(url_for('admin.create_assignment'))
+        
+        try:
+            due_date_obj = datetime.datetime.strptime(due_date, '%Y-%m-%d').date()
+            if due_date_obj <= datetime.date.today():
+                flash('Due date must be in the future.', 'error')
+                return redirect(url_for('admin.create_assignment'))
+        except ValueError:
+            flash('Invalid due date format.', 'error')
+            return redirect(url_for('admin.create_assignment'))
+        
+        # Check for existing active assignment for this engineer and topic
+        existing = Assignment.query.filter_by(
+            engineer_id=engineer_id,
+            topic=topic,
+            is_active=True
+        ).first()
+        
+        if existing:
+            flash(f'Engineer already has an active {topic} assignment.', 'error')
+            return redirect(url_for('admin.create_assignment'))
+        
+        try:
+            # Generate assignment ID
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            assignment_id = f"PD_{topic.upper()}_{engineer.engineer_id}_{timestamp}"
+            
+            # Create assignment
+            assignment = Assignment(
+                id=assignment_id,
+                title=custom_title or f"{topic.title()} Technical Assessment",
+                topic=topic,
+                engineer_id=engineer.id,
+                questions=TOPICS[topic],
+                due_date=due_date_obj,
+                points=points,
+                assigned_by_admin=current_user.id
+            )
+            
+            db.session.add(assignment)
+            db.session.commit()
+            
+            # Send notification to engineer
+            notification_service = NotificationService()
+            notification_service.send_assignment_notification(assignment)
+            
+            flash(f'Assignment created successfully for {engineer.username}!', 'success')
+            return redirect(url_for('admin.view_assignments'))
+            
+        except Exception as e:
+            db.session.rollback()
+            flash('Failed to create assignment. Please try again.', 'error')
     
+    # Get all active engineers
+    engineers = User.query.filter_by(role=UserRole.ENGINEER, is_active=True).all()
+    topics = list(TOPICS.keys())
+    
+    return render_template('admin/create_assignment.html', 
+                         engineers=engineers, 
+                         topics=topics)
+
+@admin_bp.route('/assignments')
+@login_required
+@admin_required
+def view_assignments():
+    """Admin view of all assignments"""
+    page = request.args.get('page', 1, type=int)
+    per_page = 20
+    
+    # Filters
+    engineer_id = request.args.get('engineer_id', 'all')
+    topic = request.args.get('topic', 'all')
+    status = request.args.get('status', 'all')  # active, completed, overdue
+    
+    # Build query
+    query = Assignment.query.join(User)
+    
+    if engineer_id != 'all':
+        query = query.filter(Assignment.engineer_id == engineer_id)
+    if topic != 'all':
+        query = query.filter(Assignment.topic == topic)
+    
+    # Status filtering
+    if status == 'completed':
+        query = query.join(Submission).filter(Submission.assignment_id == Assignment.id)
+    elif status == 'overdue':
+        query = query.filter(
+            Assignment.due_date < datetime.date.today(),
+            ~Assignment.submissions.any()
+        )
+    elif status == 'active':
+        query = query.filter(Assignment.is_active == True)
+    
+    assignments = query.order_by(Assignment.created_date.desc()).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+    
+    # Get filter options
+    engineers = User.query.filter_by(role=UserRole.ENGINEER).all()
+    topics = list(TOPICS.keys())
+    
+    return render_template('admin/assignments.html',
+                         assignments=assignments,
+                         engineers=engineers,
+                         topics=topics,
+                         current_filters={
+                             'engineer_id': engineer_id,
+                             'topic': topic,
+                             'status': status
+                         })
+
+# app/blueprints/engineer/__init__.py
+from flask import Blueprint
+
+engineer_bp = Blueprint('engineer', __name__)
+
+from app.blueprints.engineer import dashboard, assignments, grades, notifications
+
+# app/blueprints/engineer/assignments.py - Engineer Assignment Handling
+from flask import render_template, request, redirect, url_for, flash, jsonify
+from flask_login import login_required, current_user
+from app.blueprints.engineer import engineer_bp
+from app.models.assignment import Assignment, Submission
+from app.services.evaluator_service import EvaluationService
+from app.auth.decorators import engineer_required
+from app import db, limiter
+
+@engineer_bp.route('/assignment/<assignment_id>')
+@login_required
+@engineer_required
+def view_assignment(assignment_id):
+    """Engineer views their assignment"""
+    assignment = Assignment.query.filter_by(
+        id=assignment_id,
+        engineer_id=current_user.id,
+        is_active=True
+    ).first_or_404()
+    
+    # Check if already submitted
+    submission = Submission.query.filter_by(
+        assignment_id=assignment_id,
+        engineer_id=current_user.id
+    ).first()
+    
+    # Check if overdue
+    is_overdue = assignment.due_date < datetime.date.today() and not submission
+    
+    return render_template('engineer/assignment.html',
+                         assignment=assignment,
+                         submission=submission,
+                         is_overdue=is_overdue)
+
+@engineer_bp.route('/submit-assignment', methods=['POST'])
+@login_required
+@engineer_required
+@limiter.limit("3 per hour")  # Prevent submission spam
+def submit_assignment():
+    """Engineer submits assignment"""
+    data = request.get_json()
+    assignment_id = data.get('assignment_id')
+    answers = data.get('answers', [])
+    
+    # Verify ownership
+    assignment = Assignment.query.filter_by(
+        id=assignment_id,
+        engineer_id=current_user.id,
+        is_active=True
+    ).first()
+    
+    if not assignment:
+        return jsonify({'error': 'Assignment not found or access denied'}), 404
+    
+    # Check for existing submission
+    existing = Submission.query.filter_by(
+        assignment_id=assignment_id,
+        engineer_id=current_user.id
+    ).first()
+    
+    if existing:
+        return jsonify({'error': 'Assignment already submitted'}), 409
+    
+    # Validate answers
+    if len(answers) != len(assignment.questions):
+        return jsonify({'error': 'All questions must be answered'}), 400
+    
+    # Check minimum answer length
+    for i, answer in enumerate(answers):
+        if not answer or len(answer.strip()) < 50:
+            return jsonify({'error': f'Answer {i+1} is too short (minimum 50 characters)'}), 400
+    
+    try:
+        # Create submission
+        submission = Submission(
+            assignment_id=assignment_id,
+            engineer_id=current_user.id,
+            answers=answers
+        )
+        
+        db.session.add(submission)
+        db.session.commit()
+        
+        # Trigger automatic evaluation
+        try:
+            evaluation_service = EvaluationService()
+            evaluation_service.evaluate_submission(submission.id)
+        except Exception as eval_error:
+            # Log evaluation error but don't fail submission
+            current_app.logger.error(f"Evaluation failed for submission {submission.id}: {str(eval_error)}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Assignment submitted successfully! Your submission is being evaluated and will be reviewed by the admin.',
+            'submission_id': submission.id
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Submission failed. Please try again.'}), 500
+
+# app/services/init_service.py - Database Initialization
+from app.models.user import User, UserRole
+from app.models.assignment import Assignment, Submission
+from app import db
+import datetime
+
+def init_demo_data():
+    """Initialize demo data for testing"""
+    
+    # Create admin user
+    admin = User.query.filter_by(username='admin').first()
+    if not admin:
+        admin = User(
+            username='admin',
+            email='admin@physicaldesign.com',
+            role=UserRole.ADMIN
+        )
+        admin.set_password('admin123')
+        db.session.add(admin)
+    
+    # Create demo engineers
+    engineers_data = [
+        {
+            'username': 'engineer1',
+            'email': 'eng1@company.com',
+            'engineer_id': 'ENG_001',
+            'department': 'Physical Design',
+            'password': 'eng123'
+        },
+        {
+            'username': 'engineer2', 
+            'email': 'eng2@company.com',
+            'engineer_id': 'ENG_002',
+            'department': 'Implementation',
+            'password': 'eng123'
+        },
+        {
+            'username': 'engineer3',
+            'email': 'eng3@company.com', 
+            'engineer_id': 'ENG_003',
+            'department': 'Verification',
+            'password': 'eng123'
+        }
+    ]
+    
+    for eng_data in engineers_data:
+        existing = User.query.filter_by(username=eng_data['username']).first()
+        if not existing:
+            engineer = User(
+                username=eng_data['username'],
+                email=eng_data['email'],
+                engineer_id=eng_data['engineer_id'],
+                department=eng_data['department'],
+                role=UserRole.ENGINEER
+            )
+            engineer.set_password(eng_data['password'])
+            db.session.add(engineer)
+    
+    db.session.commit()
+    print("Demo data initialized successfully!")
+
+# run.py - Updated Application Entry Point
+import os
+from app import create_app, db
+from app.models.user import User
+from app.models.assignment import Assignment, Submission
+from app.services.init_service import init_demo_data
+
+app = create_app(os.getenv('FLASK_ENV') or 'default')
+
+@app.shell_context_processor
+def make_shell_context():
     return {
-        'word_count': words,
-        'quality': quality,
-        'score': score
+        'db': db, 
+        'User': User,
+        'Assignment': Assignment, 
+        'Submission': Submission
     }
 
-# ========================================
-# ROUTES
-# ========================================
+@app.cli.command()
+def init_db():
+    """Initialize the database with tables and demo data"""
+    db.create_all()
+    init_demo_data()
+    print('Database initialized with demo data!')
 
-@app.route('/')
-def index():
-    """Main dashboard"""
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Physical Design Assignments - Railway</title>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            body { 
-                font-family: Arial, sans-serif; 
-                max-width: 900px; 
-                margin: 50px auto; 
-                padding: 20px; 
-                background: #f5f5f5; 
-                line-height: 1.6;
-            }
-            .container { 
-                background: white; 
-                padding: 40px; 
-                border-radius: 10px; 
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
-            }
-            .btn { 
-                background: #007bff; 
-                color: white; 
-                padding: 15px 30px; 
-                text-decoration: none; 
-                border-radius: 5px; 
-                display: inline-block; 
-                margin: 10px; 
-                border: none; 
-                cursor: pointer; 
-                font-size: 16px;
-            }
-            .btn:hover { background: #0056b3; }
-            .btn-success { background: #28a745; }
-            .btn-success:hover { background: #218838; }
-            .btn-info { background: #17a2b8; }
-            .btn-info:hover { background: #138496; }
-            .section { 
-                background: #f8f9fa; 
-                padding: 25px; 
-                margin: 20px 0; 
-                border-radius: 8px; 
-                border-left: 4px solid #007bff; 
-            }
-            h1 { 
-                color: #2c3e50; 
-                text-align: center; 
-                margin-bottom: 30px; 
-            }
-            .status { 
-                text-align: center; 
-                padding: 20px; 
-                background: #d4edda; 
-                border-radius: 8px; 
-                margin: 20px 0; 
-                border: 1px solid #c3e6cb;
-            }
-            .quick-actions { 
-                text-align: center; 
-                margin: 20px 0; 
-            }
-            .badge { 
-                background: linear-gradient(45deg, #007bff, #28a745); 
-                color: white; 
-                padding: 5px 15px; 
-                border-radius: 20px; 
-                font-size: 12px; 
-                font-weight: bold; 
-            }
-            .stats {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 20px;
-                margin: 20px 0;
-            }
-            .stat-card {
-                background: white;
-                padding: 20px;
-                border-radius: 8px;
-                text-align: center;
-                border-left: 4px solid #007bff;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>📚 Physical Design Assignment System <span class="badge">Railway v2.0</span></h1>
-            
-            <div class="status">
-                <h3>✅ Railway Deployment: ONLINE</h3>
-                <p>🚀 Real-time analysis • 💾 Auto-save • 📊 Quality metrics</p>
-            </div>
-            
-            <div class="section">
-                <h2>🎯 Generate Assignment</h2>
-                <div class="quick-actions">
-                    <button class="btn btn-success" onclick="generateAssignment()">📝 Generate Assignment</button>
-                </div>
-                <p><strong>Topics Available:</strong> Floorplanning, Placement, Routing (15 questions each)</p>
-                <p><strong>Features:</strong> Real-time word counting, quality scoring, auto-save</p>
-            </div>
-
-            <div class="section">
-                <h2>📊 View Submissions</h2>
-                <div class="quick-actions">
-                    <a href="/submissions" class="btn btn-info">📋 View All Submissions</a>
-                    <a href="/analytics" class="btn">📈 Analytics</a>
-                </div>
-                <p>View completed assignments with quality analysis and scoring</p>
-            </div>
-            
-            <div class="section">
-                <h2>🔧 System</h2>
-                <div class="quick-actions">
-                    <a href="/health" class="btn">💚 Health Check</a>
-                    <a href="/api/stats" class="btn">📊 API Stats</a>
-                </div>
-            </div>
-
-            <div class="section">
-                <h2>📊 Current Statistics</h2>
-                <div class="stats" id="statsContainer">
-                    <div class="stat-card">
-                        <h3 style="margin: 0; color: #007bff;">📚 Assignments</h3>
-                        <p style="font-size: 2em; margin: 10px 0; color: #2c3e50;" id="assignmentsCount">0</p>
-                    </div>
-                    <div class="stat-card">
-                        <h3 style="margin: 0; color: #28a745;">📝 Submissions</h3>
-                        <p style="font-size: 2em; margin: 10px 0; color: #2c3e50;" id="submissionsCount">0</p>
-                    </div>
-                    <div class="stat-card">
-                        <h3 style="margin: 0; color: #ffc107;">⭐ Avg Quality</h3>
-                        <p style="font-size: 2em; margin: 10px 0; color: #2c3e50;" id="avgQuality">0</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <script>
-        async function generateAssignment() {
-            const engineerId = prompt("Enter Engineer ID (e.g., eng_001):");
-            if (!engineerId) return;
-            
-            try {
-                const response = await fetch('/api/generate/' + engineerId);
-                const data = await response.json();
-                
-                if (data.success) {
-                    alert('✅ Assignment Generated Successfully!\\n\\nTitle: ' + data.title + '\\nTopic: ' + data.topic + '\\nQuestions: ' + data.question_count);
-                    window.location.href = '/assignment/' + data.assignment_id + '/' + engineerId;
-                } else {
-                    alert('❌ Failed to generate assignment: ' + (data.error || 'Unknown error'));
-                }
-            } catch (error) {
-                alert('❌ Error: ' + error.message);
-            }
-        }
-
-        async function loadStats() {
-            try {
-                const response = await fetch('/api/stats');
-                const stats = await response.json();
-                
-                document.getElementById('assignmentsCount').textContent = stats.assignments || 0;
-                document.getElementById('submissionsCount').textContent = stats.submissions || 0;
-                document.getElementById('avgQuality').textContent = (stats.avg_quality || 0).toFixed(1);
-            } catch (error) {
-                console.log('Stats loading failed:', error);
-            }
-        }
-
-        // Load stats on page load
-        window.addEventListener('DOMContentLoaded', loadStats);
-        </script>
-    </body>
-    </html>
-    '''
-
-@app.route('/api/generate/<engineer_id>')
-def generate_assignment(engineer_id):
-    """Generate assignment API"""
-    try:
-        topic = random.choice(list(TOPICS.keys()))
-        questions = TOPICS[topic]
-        
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        assignment_id = f"PD_{topic.upper()}_{timestamp}"
-        
-        assignment = {
-            'id': assignment_id,
-            'title': f"{topic.title()} Assignment",
-            'topic': topic,
-            'engineer_id': engineer_id,
-            'questions': questions,
-            'created_date': datetime.datetime.now().isoformat(),
-            'due_date': (datetime.datetime.now() + datetime.timedelta(days=7)).strftime("%Y-%m-%d"),
-            'points': 120
-        }
-        
-        # Store assignment
-        assignments_store[f"{assignment_id}_{engineer_id}"] = assignment
-        
-        return jsonify({
-            'success': True,
-            'assignment_id': assignment_id,
-            'title': assignment['title'],
-            'topic': topic,
-            'question_count': len(questions),
-            'due_date': assignment['due_date']
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/assignment/<assignment_id>/<engineer_id>')
-def view_assignment(assignment_id, engineer_id):
-    """View assignment"""
-    try:
-        key = f"{assignment_id}_{engineer_id}"
-        assignment = assignments_store.get(key)
-        
-        if not assignment:
-            return f'''
-            <div style="text-align: center; margin: 50px; font-family: Arial, sans-serif;">
-                <h1>❌ Assignment Not Found</h1>
-                <p>Assignment ID: {assignment_id}</p>
-                <a href="/" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">← Back to Dashboard</a>
-            </div>
-            '''
-        
-        # Check if already submitted
-        submission_key = f"sub_{assignment_id}_{engineer_id}"
-        is_submitted = submission_key in submissions_store
-        
-        # Build questions HTML
-        questions_html = ""
-        for i, question in enumerate(assignment['questions']):
-            existing_answer = ""
-            if is_submitted:
-                submission = submissions_store[submission_key]
-                existing_answer = submission['answers'][i] if i < len(submission['answers']) else ""
-            
-            questions_html += f'''
-            <div class="question-container">
-                <div class="question-header">
-                    <span class="question-number">Question {i+1}</span>
-                    <span class="word-counter" id="counter{i}">0 words</span>
-                </div>
-                
-                <h4>{question}</h4>
-                
-                <textarea 
-                    class="answer-textarea" 
-                    name="answer_{i}"
-                    placeholder="Enter your detailed answer here (minimum 200 words)..."
-                    onInput="updateWordCount({i})"
-                    {"disabled" if is_submitted else ""}
-                >{existing_answer}</textarea>
-            </div>
-            '''
-        
-        submit_section = ""
-        if is_submitted:
-            submission = submissions_store[submission_key]
-            submit_section = f'''
-            <div class="submit-section submitted">
-                <h3>✅ Assignment Submitted Successfully!</h3>
-                <p>Submitted: {submission['submitted_date']}</p>
-                <p>Total Words: {submission['total_words']:,}</p>
-                <p>Quality Score: {submission['avg_score']:.1f}/100</p>
-            </div>
-            '''
-        else:
-            submit_section = '''
-            <div class="submit-section">
-                <h3>🚀 Ready to Submit?</h3>
-                <p id="submitStatus">Complete all questions to submit</p>
-                <button type="submit" id="submitBtn" disabled>Submit Assignment</button>
-            </div>
-            '''
-        
-        return f'''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>{assignment['title']}</title>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                body {{ 
-                    font-family: Arial, sans-serif; 
-                    max-width: 1000px; 
-                    margin: 0 auto; 
-                    padding: 20px; 
-                    background: #f5f5f5; 
-                    line-height: 1.6;
-                }}
-                .container {{ 
-                    background: white; 
-                    padding: 40px; 
-                    border-radius: 10px; 
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
-                }}
-                .header {{ 
-                    text-align: center; 
-                    border-bottom: 3px solid #2c3e50; 
-                    padding-bottom: 20px; 
-                    margin-bottom: 30px; 
-                }}
-                .question-container {{ 
-                    background: #f8f9fa; 
-                    margin: 20px 0; 
-                    padding: 25px; 
-                    border-radius: 8px; 
-                    border-left: 4px solid #28a745; 
-                }}
-                .question-header {{ 
-                    display: flex; 
-                    justify-content: space-between; 
-                    align-items: center; 
-                    margin-bottom: 15px; 
-                }}
-                .question-number {{ 
-                    background: #007bff; 
-                    color: white; 
-                    padding: 5px 15px; 
-                    border-radius: 20px; 
-                    font-weight: bold; 
-                }}
-                .word-counter {{ 
-                    font-size: 14px; 
-                    color: #6c757d; 
-                    font-weight: bold;
-                }}
-                .word-counter.good {{ color: #28a745; }}
-                .word-counter.warning {{ color: #ffc107; }}
-                .word-counter.poor {{ color: #dc3545; }}
-                .answer-textarea {{ 
-                    width: 100%; 
-                    min-height: 150px; 
-                    padding: 15px; 
-                    border: 2px solid #ddd; 
-                    border-radius: 5px; 
-                    font-family: Arial, sans-serif; 
-                    font-size: 14px; 
-                    resize: vertical;
-                }}
-                .answer-textarea:focus {{ 
-                    border-color: #007bff; 
-                    outline: none; 
-                }}
-                .submit-section {{ 
-                    background: #e9ecef; 
-                    padding: 25px; 
-                    border-radius: 8px; 
-                    text-align: center; 
-                    margin: 30px 0; 
-                }}
-                .submit-section.submitted {{ 
-                    background: #d4edda; 
-                    color: #155724; 
-                }}
-                button {{ 
-                    background: #28a745; 
-                    color: white; 
-                    padding: 15px 30px; 
-                    border: none; 
-                    border-radius: 5px; 
-                    font-size: 16px; 
-                    cursor: pointer; 
-                }}
-                button:disabled {{ 
-                    background: #6c757d; 
-                    cursor: not-allowed; 
-                }}
-                .metrics {{ 
-                    background: #e7f3ff; 
-                    padding: 20px; 
-                    border-radius: 8px; 
-                    margin: 20px 0; 
-                    text-align: center;
-                }}
-                .auto-save {{ 
-                    position: fixed; 
-                    top: 20px; 
-                    right: 20px; 
-                    background: #28a745; 
-                    color: white; 
-                    padding: 10px 20px; 
-                    border-radius: 20px; 
-                    opacity: 0; 
-                    transition: opacity 0.3s;
-                }}
-                .auto-save.show {{ opacity: 1; }}
-            </style>
-        </head>
-        <body>
-            <div id="autoSaveIndicator" class="auto-save">✅ Auto-saved</div>
-            
-            <div class="container">
-                <div class="header">
-                    <h1>{assignment['title']}</h1>
-                    <p><strong>Assignment ID:</strong> {assignment['id']}</p>
-                    <p><strong>Engineer:</strong> {assignment['engineer_id']} | <strong>Topic:</strong> {assignment['topic'].title()}</p>
-                    <p><strong>Due Date:</strong> {assignment['due_date']} | <strong>Points:</strong> {assignment['points']}</p>
-                </div>
-
-                <div class="metrics">
-                    <h3>📊 Real-time Metrics</h3>
-                    <p>Total Words: <span id="totalWords">0</span> | 
-                       Completion: <span id="completion">0%</span> | 
-                       Estimated Quality: <span id="quality">0</span>/100</p>
-                </div>
-
-                <form id="assignmentForm" onsubmit="submitAssignment(event)">
-                    <input type="hidden" name="assignment_id" value="{assignment['id']}">
-                    <input type="hidden" name="engineer_id" value="{assignment['engineer_id']}">
-                    
-                    {questions_html}
-                    
-                    {submit_section}
-                </form>
-
-                <div style="text-align: center; margin: 30px 0;">
-                    <a href="/" style="background: #6c757d; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">← Back to Dashboard</a>
-                    <a href="/submissions" style="background: #17a2b8; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-left: 10px;">📋 View Submissions</a>
-                </div>
-            </div>
-
-            <script>
-                let autoSaveInterval;
-                let isSubmitted = {str(is_submitted).lower()};
-
-                function updateWordCount(questionIndex) {{
-                    const textarea = document.querySelector('[name="answer_' + questionIndex + '"]');
-                    const counter = document.getElementById('counter' + questionIndex);
-                    const words = textarea.value.trim() ? textarea.value.trim().split(/\\s+/).length : 0;
-                    
-                    counter.textContent = words + ' words';
-                    
-                    if (words >= 200) {{
-                        counter.className = 'word-counter good';
-                    }} else if (words >= 100) {{
-                        counter.className = 'word-counter warning';
-                    }} else if (words > 0) {{
-                        counter.className = 'word-counter poor';
-                    }} else {{
-                        counter.className = 'word-counter';
-                    }}
-                    
-                    updateOverallMetrics();
-                }}
-
-                function updateOverallMetrics() {{
-                    const textareas = document.querySelectorAll('.answer-textarea');
-                    let totalWords = 0;
-                    let completedQuestions = 0;
-                    
-                    textareas.forEach(textarea => {{
-                        const words = textarea.value.trim() ? textarea.value.trim().split(/\\s+/).length : 0;
-                        totalWords += words;
-                        if (words >= 50) completedQuestions++;
-                    }});
-                    
-                    const completion = Math.round((completedQuestions / textareas.length) * 100);
-                    const quality = Math.min(100, Math.round((totalWords / (textareas.length * 200)) * 100));
-                    
-                    document.getElementById('totalWords').textContent = totalWords.toLocaleString();
-                    document.getElementById('completion').textContent = completion + '%';
-                    document.getElementById('quality').textContent = quality;
-                    
-                    // Update submit button
-                    const submitBtn = document.getElementById('submitBtn');
-                    const submitStatus = document.getElementById('submitStatus');
-                    
-                    if (submitBtn && submitStatus) {{
-                        if (completion === 100) {{
-                            submitBtn.disabled = false;
-                            submitStatus.textContent = '✅ Ready to submit!';
-                        }} else {{
-                            submitBtn.disabled = true;
-                            submitStatus.textContent = 'Complete all questions to submit (' + completedQuestions + '/15)';
-                        }}
-                    }}
-                }}
-
-                function autoSave() {{
-                    if (isSubmitted) return;
-                    
-                    const formData = new FormData(document.getElementById('assignmentForm'));
-                    const data = Object.fromEntries(formData);
-                    
-                    fetch('/api/auto-save', {{
-                        method: 'POST',
-                        headers: {{'Content-Type': 'application/json'}},
-                        body: JSON.stringify(data)
-                    }})
-                    .then(response => response.json())
-                    .then(result => {{
-                        if (result.success) {{
-                            showAutoSaveIndicator();
-                        }}
-                    }})
-                    .catch(error => console.log('Auto-save failed:', error));
-                }}
-
-                function showAutoSaveIndicator() {{
-                    const indicator = document.getElementById('autoSaveIndicator');
-                    indicator.classList.add('show');
-                    setTimeout(() => {{
-                        indicator.classList.remove('show');
-                    }}, 2000);
-                }}
-
-                function submitAssignment(event) {{
-                    event.preventDefault();
-                    
-                    if (!confirm('🚀 Submit Assignment?\\n\\nOnce submitted, you cannot make changes.')) {{
-                        return;
-                    }}
-                    
-                    const formData = new FormData(event.target);
-                    const data = Object.fromEntries(formData);
-                    
-                    fetch('/api/submit', {{
-                        method: 'POST',
-                        headers: {{'Content-Type': 'application/json'}},
-                        body: JSON.stringify(data)
-                    }})
-                    .then(response => response.json())
-                    .then(result => {{
-                        if (result.success) {{
-                            alert('✅ Assignment submitted successfully!');
-                            location.reload();
-                        }} else {{
-                            alert('❌ Submission failed: ' + result.error);
-                        }}
-                    }})
-                    .catch(error => {{
-                        alert('❌ Submission failed: ' + error.message);
-                    }});
-                }}
-
-                // Initialize
-                document.addEventListener('DOMContentLoaded', function() {{
-                    // Update word counts for existing content
-                    const textareas = document.querySelectorAll('.answer-textarea');
-                    textareas.forEach((textarea, index) => {{
-                        updateWordCount(index);
-                    }});
-                    
-                    // Start auto-save if not submitted
-                    if (!isSubmitted) {{
-                        autoSaveInterval = setInterval(autoSave, 30000); // Every 30 seconds
-                    }}
-                }});
-
-                // Clean up on page unload
-                window.addEventListener('beforeunload', function() {{
-                    if (autoSaveInterval) {{
-                        clearInterval(autoSaveInterval);
-                    }}
-                    if (!isSubmitted) {{
-                        autoSave();
-                    }}
-                }});
-            </script>
-        </body>
-        </html>
-        '''
-    except Exception as e:
-        return f"<h1>Error: {str(e)}</h1>"
-
-@app.route('/api/submit', methods=['POST'])
-def submit_assignment():
-    """Submit assignment"""
-    try:
-        data = request.get_json()
-        assignment_id = data.get('assignment_id')
-        engineer_id = data.get('engineer_id')
-        
-        # Collect answers
-        answers = []
-        total_words = 0
-        scores = []
-        
-        for i in range(15):
-            answer = data.get(f'answer_{i}', '').strip()
-            answers.append(answer)
-            
-            analysis = analyze_answer(answer)
-            total_words += analysis['word_count']
-            scores.append(analysis['score'])
-        
-        avg_score = sum(scores) / len(scores) if scores else 0
-        
-        # Store submission
-        submission_key = f"sub_{assignment_id}_{engineer_id}"
-        submissions_store[submission_key] = {
-            'assignment_id': assignment_id,
-            'engineer_id': engineer_id,
-            'answers': answers,
-            'total_words': total_words,
-            'avg_score': avg_score,
-            'submitted_date': datetime.datetime.now().isoformat(),
-            'status': 'submitted'
-        }
-        
-        return jsonify({
-            'success': True,
-            'message': f'Assignment submitted! Score: {avg_score:.1f}/100',
-            'total_words': total_words,
-            'avg_score': avg_score
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/auto-save', methods=['POST'])
-def auto_save():
-    """Auto-save progress"""
-    try:
-        # Simple auto-save acknowledgment
-        return jsonify({'success': True, 'message': 'Progress saved'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/submissions')
-def view_submissions():
-    """View all submissions"""
-    try:
-        if not submissions_store:
-            return '''
-            <div style="text-align: center; margin: 50px; font-family: Arial, sans-serif;">
-                <h1>📭 No Submissions Yet</h1>
-                <p>Generate and submit an assignment to see submissions here.</p>
-                <a href="/" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">← Back to Dashboard</a>
-            </div>
-            '''
-        
-        submissions_html = ""
-        for key, submission in submissions_store.items():
-            submissions_html += f'''
- 0; border-radius: 8px; border-left: 4px solid #28a745; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-                <h3 style="margin: 0 0 10px 0; color: #2c3e50;">📚 {submission['assignment_id']}</h3>
-                <p><strong>👤 Engineer:</strong> {submission['engineer_id']}</p>
-                <p><strong>📅 Submitted:</strong> {submission['submitted_date'][:19]}</p>
-                <p><strong>📊 Status:</strong> <span style="color: #28a745; font-weight: bold;">{submission['status'].title()}</span></p>
-                <p><strong>📝 Total Words:</strong> {submission['total_words']:,}</p>
-                <p><strong>🎯 Quality Score:</strong> {submission['avg_score']:.1f}/100</p>
-            </div>
-            '''
-        
-        return f'''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>📊 Submissions Dashboard</title>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                body {{ 
-                    font-family: Arial, sans-serif; 
-                    max-width: 1000px; 
-                    margin: 0 auto; 
-                    padding: 20px; 
-                    background: #f5f5f5; 
-                }}
-                .container {{ 
-                    background: white; 
-                    padding: 40px; 
-                    border-radius: 10px; 
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
-                }}
-                .stats {{ 
-                    display: grid; 
-                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
-                    gap: 20px; 
-                    margin: 20px 0; 
-                }}
-                .stat-card {{ 
-                    background: #f8f9fa; 
-                    padding: 20px; 
-                    border-radius: 8px; 
-                    text-align: center; 
-                    border-left: 4px solid #007bff; 
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1 style="text-align: center; color: #2c3e50;">📊 Submissions Dashboard</h1>
-                
-                <div class="stats">
-                    <div class="stat-card">
-                        <h3 style="margin: 0; color: #007bff;">📋 Total Submissions</h3>
-                        <p style="font-size: 2em; margin: 10px 0; color: #2c3e50;">{len(submissions_store)}</p>
-                    </div>
-                    <div class="stat-card">
-                        <h3 style="margin: 0; color: #28a745;">✅ Completed</h3>
-                        <p style="font-size: 2em; margin: 10px 0; color: #2c3e50;">{len(submissions_store)}</p>
-                    </div>
-                </div>
-                
-                <div style="text-align: center; margin: 30px 0;">
-                    <a href="/" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">← Back to Dashboard</a>
-                </div>
-                
-                <h2 style="color: #2c3e50; border-bottom: 2px solid #007bff; padding-bottom: 10px;">Recent Submissions</h2>
-                {submissions_html}
-            </div>
-        </body>
-        </html>
-        '''
-    except Exception as e:
-        return f"<h1>Error: {str(e)}</h1>"
-
-@app.route('/api/stats')
-def api_stats():
-    """API stats endpoint"""
-    try:
-        total_assignments = len(assignments_store)
-        total_submissions = len(submissions_store)
-        
-        if total_submissions > 0:
-            avg_quality = sum(s['avg_score'] for s in submissions_store.values()) / total_submissions
-        else:
-            avg_quality = 0
-        
-        return jsonify({
-            'assignments': total_assignments,
-            'submissions': total_submissions,
-            'avg_quality': avg_quality,
-            'status': 'healthy'
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/analytics')
-def analytics():
-    """Simple analytics page"""
-    try:
-        if not submissions_store:
-            return '''
-            <div style="text-align: center; margin: 50px; font-family: Arial, sans-serif;">
-                <h1>📈 No Analytics Data</h1>
-                <p>Submit some assignments to see analytics.</p>
-                <a href="/" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">← Back to Dashboard</a>
-            </div>
-            '''
-        
-        # Calculate analytics
-        total_words = sum(s['total_words'] for s in submissions_store.values())
-        avg_score = sum(s['avg_score'] for s in submissions_store.values()) / len(submissions_store)
-        total_submissions = len(submissions_store)
-        
-        return f'''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>📈 Analytics Dashboard</title>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                body {{ 
-                    font-family: Arial, sans-serif; 
-                    max-width: 1000px; 
-                    margin: 0 auto; 
-                    padding: 20px; 
-                    background: #f5f5f5; 
-                }}
-                .container {{ 
-                    background: white; 
-                    padding: 40px; 
-                    border-radius: 10px; 
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
-                }}
-                .metrics {{ 
-                    display: grid; 
-                    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); 
-                    gap: 20px; 
-                    margin: 30px 0; 
-                }}
-                .metric-card {{ 
-                    background: #f8f9fa; 
-                    padding: 25px; 
-                    border-radius: 8px; 
-                    text-align: center; 
-                    border-left: 4px solid #007bff; 
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1 style="text-align: center; color: #2c3e50;">📈 Analytics Dashboard</h1>
-                
-                <div class="metrics">
-                    <div class="metric-card">
-                        <h3 style="margin: 0; color: #007bff;">📊 Total Submissions</h3>
-                        <p style="font-size: 3em; margin: 15px 0; color: #2c3e50;">{total_submissions}</p>
-                        <p style="color: #6c757d;">Assignments completed</p>
-                    </div>
-                    
-                    <div class="metric-card">
-                        <h3 style="margin: 0; color: #28a745;">📝 Total Words</h3>
-                        <p style="font-size: 3em; margin: 15px 0; color: #2c3e50;">{total_words:,}</p>
-                        <p style="color: #6c757d;">Words written</p>
-                    </div>
-                    
-                    <div class="metric-card">
-                        <h3 style="margin: 0; color: #ffc107;">⭐ Average Quality</h3>
-                        <p style="font-size: 3em; margin: 15px 0; color: #2c3e50;">{avg_score:.1f}</p>
-                        <p style="color: #6c757d;">Out of 100</p>
-                    </div>
-                    
-                    <div class="metric-card">
-                        <h3 style="margin: 0; color: #17a2b8;">📈 Avg Words/Submission</h3>
-                        <p style="font-size: 3em; margin: 15px 0; color: #2c3e50;">{int(total_words/total_submissions):,}</p>
-                        <p style="color: #6c757d;">Words per assignment</p>
-                    </div>
-                </div>
-                
-                <div style="text-align: center; margin: 30px 0;">
-                    <a href="/" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">← Back to Dashboard</a>
-                    <a href="/submissions" style="background: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-left: 10px;">📋 View Submissions</a>
-                </div>
-            </div>
-        </body>
-        </html>
-        '''
-    except Exception as e:
-        return f"<h1>Error: {str(e)}</h1>"
-
-@app.route('/health')
-def health_check():
-    """Health check endpoint"""
-    try:
-        return jsonify({
-            'status': 'healthy',
-            'version': '2.0-railway-minimal',
-            'platform': 'Railway',
-            'server': 'Gunicorn',
-            'assignments': len(assignments_store),
-            'submissions': len(submissions_store),
-            'timestamp': datetime.datetime.now().isoformat(),
-            'message': 'Physical Design Assignment System is running successfully on Railway'
-        })
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'error': str(e),
-            'timestamp': datetime.datetime.now().isoformat()
-        }), 500
-
-# ========================================
-# ERROR HANDLERS
-# ========================================
-
-@app.errorhandler(404)
-def not_found(error):
-    return '''
-    <div style="text-align: center; margin: 50px; font-family: Arial, sans-serif;">
-        <h1>404 - Page Not Found</h1>
-        <p>The requested page could not be found.</p>
-        <a href="/" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">← Back to Dashboard</a>
-    </div>
-    ''', 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return '''
-    <div style="text-align: center; margin: 50px; font-family: Arial, sans-serif;">
-        <h1>500 - Internal Server Error</h1>
-        <p>Something went wrong on our end.</p>
-        <a href="/" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">← Back to Dashboard</a>
-    </div>
-    ''', 500
-
-# ========================================
-# WSGI APPLICATION FOR RAILWAY
-# ========================================
-
-# This is what Gunicorn looks for
-application = app
+@app.cli.command()
+def create_admin():
+    """Create admin user"""
+    username = input('Admin username: ')
+    email = input('Admin email: ')
+    password = input('Admin password: ')
+    
+    admin = User(
+        username=username,
+        email=email,
+        role='admin'
+    )
+    admin.set_password(password)
+    
+    db.session.add(admin)
+    db.session.commit()
+    print(f'Admin user {username} created successfully!')
 
 if __name__ == '__main__':
-    # For local development only
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    with app.app_context():
+        db.create_all()  # Ensure tables exist
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=True)
+
+# app/blueprints/main/routes.py - Main Routes (Landing Page)
+from flask import render_template, redirect, url_for
+from flask_login import current_user
+from app.blueprints.main import main_bp
+
+@main_bp.route('/')
+def index():
+    """Landing page - redirect based on authentication status"""
+    if current_user.is_authenticated:
+        if current_user.is_admin():
+            return redirect(url_for('admin.dashboard'))
+        else:
+            return redirect(url_for('engineer.dashboard'))
+    
+    return redirect(url_for('auth.login'))
+
+@main_bp.route('/health')
+def health_check():
+    """System health check"""
+    return {
+        'status': 'healthy',
+        'timestamp': datetime.datetime.utcnow().isoformat(),
+        'system': 'Physical Design Assignment System',
+        'version': '2.0.0'
+    }
+
+# app/blueprints/main/__init__.py
+from flask import Blueprint
+
+main_bp = Blueprint('main', __name__)
+
+from app.blueprints.main import routes
+
+# requirements.txt - Updated Dependencies
+"""
+Flask==2.3.3
+Flask-SQLAlchemy==3.0.5
+Flask-Login==0.6.3
+Flask-WTF==1.2.1
+Flask-Talisman==1.1.0
+Flask-Limiter==3.5.0
+Werkzeug==2.3.7
+WTForms==3.1.0
+python-dotenv==1.0.0
+gunicorn==21.2.0
+marshmallow==3.20.1
+"""
+
+# .env.example - Environment Variables Template
+"""
+# Flask Configuration
+FLASK_ENV=development
+SECRET_KEY=your-super-secret-key-here
+
+# Database
+DATABASE_URL=sqlite:///app.db
+
+# Redis (for rate limiting and caching)
+REDIS_URL=redis://localhost:6379/0
+
+# Email (for notifications - optional)
+MAIL_SERVER=smtp.gmail.com
+MAIL_PORT=587
+MAIL_USE_TLS=true
+MAIL_USERNAME=your-email@gmail.com
+MAIL_PASSWORD=your-app-password
+
+# Security
+WTF_CSRF_TIME_LIMIT=3600
+"""
+
+# Dockerfile - Production Deployment
+"""
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# Create necessary directories
+RUN mkdir -p logs instance
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Run application
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "4", "--timeout", "120", "run:app"]
+"""
+
+# docker-compose.yml - Development Setup
+"""
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "5000:8000"
+    environment:
+      - FLASK_ENV=development
+      - DATABASE_URL=postgresql://user:password@db:5432/physicaldesign
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./logs:/app/logs
+
+  db:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=physicaldesign
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:
+"""
+
+# app/templates/admin/create_assignment.html - Assignment Creation Form
+"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Create Assignment - Admin</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            background: #f5f5f5;
+        }
+        .header {
+            background: #2c3e50;
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .container {
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        .form-container {
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 25px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            border-color: #3498db;
+            outline: none;
+        }
+        .form-group small {
+            color: #666;
+            font-size: 14px;
+            margin-top: 5px;
+            display: block;
+        }
+        .btn {
+            padding: 12px 25px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: all 0.3s;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #2980b9;
+        }
+        .btn-secondary {
+            background: #95a5a6;
+            color: white;
+            margin-right: 10px;
+        }
+        .btn-secondary:hover {
+            background: #7f8c8d;
+        }
+        .topic-preview {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 5px;
+            margin-top: 15px;
+            border-left: 4px solid #3498db;
+        }
+        .question-count {
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        .alert {
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+        }
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>➕ Create New Assignment</h1>
+        <div>
+            <a href="{{ url_for('admin.dashboard') }}" style="color: white; text-decoration: none;">← Back to Dashboard</a>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="form-container">
+            <h2>📝 Assignment Details</h2>
+            
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ 'error' if category == 'error' else 'success' }}">
+                            {{ message }}
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+            
+            <form method="POST">
+                {{ csrf_token() }}
+                
+                <div class="form-group">
+                    <label for="engineer_id">👨‍💻 Select Engineer:</label>
+                    <select id="engineer_id" name="engineer_id" required>
+                        <option value="">Choose an engineer...</option>
+                        {% for engineer in engineers %}
+                            <option value="{{ engineer.id }}">
+                                {{ engineer.username }} ({{ engineer.engineer_id }}) - {{ engineer.department }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                    <small>Select the engineer who will receive this assignment</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="topic">🎯 Topic:</label>
+                    <select id="topic" name="topic" required onchange="updateTopicPreview()">
+                        <option value="">Choose a topic...</option>
+                        {% for topic in topics %}
+                            <option value="{{ topic }}">{{ topic.title() }}</option>
+                        {% endfor %}
+                    </select>
+                    <div id="topicPreview" class="topic-preview" style="display: none;">
+                        <div class="question-count" id="questionCount"></div>
+                        <p>This topic includes comprehensive questions covering technical terminology, methodology, and practical applications.</p>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="custom_title">📋 Custom Title (Optional):</label>
+                    <input type="text" id="custom_title" name="custom_title" 
+                           placeholder="Leave blank for auto-generated title">
+                    <small>If provided, this will override the default title</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="due_date">📅 Due Date:</label>
+                    <input type="date" id="due_date" name="due_date" required>
+                    <small>Assignment must be completed by this date</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="points">🏆 Points:</label>
+                    <input type="number" id="points" name="points" value="120" min="50" max="200">
+                    <small>Total points available for this assignment (50-200)</small>
+                </div>
+                
+                <div style="margin-top: 30px;">
+                    <a href="{{ url_for('admin.view_assignments') }}" class="btn btn-secondary">Cancel</a>
+                    <button type="submit" class="btn btn-primary">🚀 Create Assignment</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        // Set minimum date to tomorrow
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        document.getElementById('due_date').min = tomorrow.toISOString().split('T')[0];
+        
+        // Topic question counts
+        const topicQuestions = {
+            'floorplanning': 15,
+            'placement': 15,
+            'routing': 15
+        };
+        
+        function updateTopicPreview() {
+            const topic = document.getElementById('topic').value;
+            const preview = document.getElementById('topicPreview');
+            const questionCount = document.getElementById('questionCount');
+            
+            if (topic && topicQuestions[topic]) {
+                questionCount.textContent = `${topicQuestions[topic]} technical questions included`;
+                preview.style.display = 'block';
+            } else {
+                preview.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+# app/cli.py - Command Line Interface
+from flask.cli import with_appcontext
+import click
+from app import db
+from app.models.user import User, UserRole
+from app.services.init_service import init_demo_data
+
+@click.command()
+@with_appcontext
+def init_db():
+    """Initialize database with tables and demo data."""
+    db.create_all()
+    init_demo_data()
+    click.echo('Database initialized successfully!')
+
+@click.command()
+@click.option('--username', prompt='Username', help='Admin username')
+@click.option('--email', prompt='Email', help='Admin email')
+@click.option('--password', prompt='Password', hide_input=True, help='Admin password')
+@with_appcontext
+def create_admin(username, email, password):
+    """Create admin user."""
+    existing = User.query.filter_by(username=username).first()
+    if existing:
+        click.echo(f'User {username} already exists!')
+        return
+    
+    admin = User(
+        username=username,
+        email=email,
+        role=UserRole.ADMIN
+    )
+    admin.set_password(password)
+    
+    db.session.add(admin)
+    db.session.commit()
+    
+    click.echo(f'Admin user {username} created successfully!')
+
+def register_commands(app):
+    """Register CLI commands with the Flask app."""
+    app.cli.add_command(init_db)
+    app.cli.add_command(create_admin)
