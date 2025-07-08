@@ -165,3 +165,10 @@ QUESTIONS = {
         "Describe routing optimization techniques for timing closure."
     ]
 }
+
+# WSGI compatibility for Railway
+application = app
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
